@@ -1,13 +1,17 @@
-// Steady Sleeve — a dispersed-ownership breakout bot with an hourly-Sharpe governor,
+// Steady Sleeve — a mature-large-cap momentum bot with an hourly-Sharpe governor,
 // for agent-fun/replay/v2 (pump.fun bonding curves).
 //
-// Idea: most pump.fun launches are noise that fees eat alive. This bot only buys a launch
-// whose tape looks like dispersed retail demand (many distinct buyers, no whale, inflow
-// accelerating, price pressing its window high), sizes small, pyramids only into strength,
-// and lets a rolling hourly-Sharpe governor decide whether the portfolio may take new risk
-// at all. Exits harvest a slice at breakeven-plus, then trail. A pace probe guarantees the
-// guardrail minimums (round trips on >= 20 mints) without fee-bleeding when the main engine
-// is already on pace. A pure function of the batches it is fed: no clock, no environment,
+// What the dev window actually rewards: most pump.fun launches bleed — a random entry
+// loses ~2% in an hour. The one pocket with positive expectancy is MATURE, LARGE curves
+// (real SOL 30–100, age past ~120 slots) with net inflow still positive and price pressing
+// its window high: their median +300-slot return is ~+12% with ~70% beating fees, while
+// young coins that sprint to 60 SOL fast dump ~-47% over the same span. So this bot only
+// buys seasoned big curves in motion, sizes small, pyramids only into strength, and lets a
+// rolling hourly-Sharpe governor decide whether the portfolio may take new risk at all.
+// Exits harvest a slice at breakeven-plus, then trail; nothing is held past ~300 slots,
+// because even the good coins fade by 1200 slots. A pace probe guarantees the guardrail
+// minimums (round trips on >= 20 mints) without fee-bleeding when the main engine is
+// already on pace. A pure function of the batches it is fed: no clock, no environment,
 // no randomness — every number below is a fixed parameter or derived from state.
 
 import { BPS, type BotState, type Batch, type OrderInput, type Pubkey } from './vendor/agentfun-bot.ts';
@@ -89,15 +93,15 @@ export interface Params {
 
 export const DEFAULT_PARAMS: Params = {
   entryWindow: 120,
-  minAge: 15,
-  maxAge: 900,
-  minRealSol: 2_000_000_000,
-  maxRealSol: 200_000_000_000,
+  minAge: 120,
+  maxAge: 3000,
+  minRealSol: 30_000_000_000,
+  maxRealSol: 120_000_000_000,
   minWindowTrades: 4,
   minWindowBuyers: 3,
   maxTopBuyerBps: 4000,
-  minRunupBps: 500,
-  maxRunupBps: 5000,
+  minRunupBps: 0,
+  maxRunupBps: 10000,
   withinHighBps: 500,
   skipDevSold: true,
   firstBuyLamports: 50_000_000,
@@ -112,11 +116,11 @@ export const DEFAULT_PARAMS: Params = {
   tp1Bps: 1000,
   tp1PartBps: 5000,
   slAfterTp1Bps: 0,
-  tpBps: 4000,
-  slBps: 1300,
-  trailArmBps: 1500,
-  trailBps: 2500,
-  maxHold: 1200,
+  tpBps: 1500,
+  slBps: 1000,
+  trailArmBps: 1000,
+  trailBps: 1500,
+  maxHold: 300,
   holdFreeBps: 1000,
   staleSlots: 600,
   exitWindow: 60,
