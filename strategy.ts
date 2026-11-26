@@ -3,16 +3,21 @@
 //
 // What the dev window actually rewards: most pump.fun launches bleed — a random entry
 // loses ~2% in an hour. The one pocket with positive expectancy is MATURE, LARGE curves
-// (real SOL 30–100, age past ~120 slots) with net inflow still positive and price pressing
+// (real SOL 30–120, age past ~300 slots) with net inflow still positive and price pressing
 // its window high: their median +300-slot return is ~+12% with ~70% beating fees, while
 // young coins that sprint to 60 SOL fast dump ~-47% over the same span. So this bot only
-// buys seasoned big curves in motion, sizes small, pyramids only into strength, and lets a
-// rolling hourly-Sharpe governor decide whether the portfolio may take new risk at all.
-// Exits harvest a slice at breakeven-plus, then trail; nothing is held past ~300 slots,
-// because even the good coins fade by 1200 slots. A pace probe guarantees the guardrail
-// minimums (round trips on >= 20 mints) without fee-bleeding when the main engine is
-// already on pace. A pure function of the batches it is fed: no clock, no environment,
-// no randomness — every number below is a fixed parameter or derived from state.
+// buys seasoned big curves in motion, one small 0.05 SOL first buy and no pyramids (adds
+// only ever bought the top), and lets a rolling hourly-Sharpe governor decide whether the
+// portfolio may take new risk at all. A coin that was exited may be bought again after a
+// 600-slot cooldown, up to twice: the edge lives on already-big coins, so one shot per
+// coin wastes it. Launches whose first 3 slots already show 11+ distinct buyers or 10+
+// trades are coordinated bundles (many wallets in, all out together one slot later) and
+// are skipped for good, however big they grow; a creator selling while held is an instant
+// exit. Exits harvest a slice at breakeven-plus, then trail; nothing is held past ~300
+// slots, because even the good coins fade by 1200 slots. A pace probe guarantees the
+// guardrail minimums (round trips on >= 20 mints) without fee-bleeding when the main
+// engine is already on pace. A pure function of the batches it is fed: no clock, no
+// environment, no randomness — every number below is a fixed parameter or derived from state.
 
 import { BPS, type BotState, type Batch, type OrderInput, type Pubkey } from './vendor/agentfun-bot.ts';
 

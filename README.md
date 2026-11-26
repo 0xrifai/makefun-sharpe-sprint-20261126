@@ -12,41 +12,47 @@ beat one lucky moonshot — so this bot is built to be boring on purpose.
 
 ## How it trades
 
-**Dispersed-ownership breakout entries.** A coin only earns a first buy when its launch
-tape looks retail, not bundled: the curve is mature enough to have a tape, net inflow over
-the recent window is positive *and* accelerating (the second half of the window buys more
-than the first), at least 5 distinct non-creator buyers showed up, no single buyer owns
-more than ~40% of the window's buy volume, the price is up 5–50% over the window and
-sitting within 5% of its window high, and real SOL sits in a sane 2–60 SOL band. The
-creator must not have sold. Whale-dominated or bundle-looking launches are skipped.
+**Mature large-cap momentum entries.** Most pump.fun launches bleed — a random entry
+loses ~2% in an hour. The one pocket with positive expectancy on the dev window is
+seasoned, large curves (real SOL 30–120, age past ~300 slots) with net inflow still
+positive and accelerating, price pressing its window high, and at least 3 distinct buyers
+with no single buyer over ~40% of window buy volume. A coin only earns a first buy of
+~0.05 SOL, and there are no pyramids: adds only ever bought the top. A coin that was
+exited may be bought again after a 600-slot cooldown, up to twice in total — the edge
+lives on already-big coins, so one shot per coin wastes it.
 
-**Small first buys, pyramid only into strength.** The first buy is ~0.05 SOL. Adds only
-happen when the price is above the last buy and inflow is still positive, up to ~0.3–0.5
-SOL per position, with total exposure capped near 4–6 SOL of the 10 SOL paper capital.
-Every buy respects the harness cap of 1% of the curve's real SOL reserve.
+**Bundle filter.** A launch whose first 3 slots already show 11+ distinct buyers or 10+
+trades is a coordinated bundle (many wallets in, all out together one slot later — one
+dev-window bundle dumped 84% in a single slot) and is skipped for good, however big it
+grows. A creator selling while a position is held is an instant exit.
 
 **Hourly-Sharpe governor (the core).** The bot tracks its own realized hourly returns
-from batch marks and account value and keeps a rolling window of the last 6 hourly
-returns. When the rolling Sharpe goes negative, or rolling hourly volatility spikes above
-its threshold, the governor turns red: no new entries, and exits accelerate. When it is
-green, the bot trades normally. The governor gates entries *and* exits — two-sided.
+from batch marks and account value and keeps a rolling window of the last 3 hourly
+returns. The governor only turns red on a *material* deterioration — the last hour lost
+more than 2%, the rolling mean lost more than 1%, or rolling hourly volatility topped 8%.
+Small consistent losses must not latch it red: a flat book stays green, and a red state
+clears as soon as the window slides past the bad hour, so the governor throttles risk
+instead of shutting the bot down for the whole run. When it is red: no new entries, and
+exits tighten. The governor gates entries *and* exits — two-sided.
 
-**Exits that harvest, then protect.** A breakeven partial harvest sells ~50% at +8–12%
-and moves the stop to entry cost; a trailing stop (~20–30% off the peak) arms once the
-position is up; a hard stop sits ~12–15% under cost; positions also exit on net outflow
-over a short window, on a single large sell, or after ~1000–1500 slots held (no time exit
-while the position is comfortably up).
+**Exits that harvest, then protect.** A breakeven partial harvest sells ~50% at +10%
+and moves the stop to entry cost; a trailing stop (~15% off the peak) arms once the
+position is up 10%; a hard stop sits ~15% under cost; positions also exit on net outflow
+over a short window, on a single large sell, on creator selling, or after ~300 slots held
+(no time exit while the position is comfortably up).
 
 **Guardrail pacing.** Round trips need ≥0.01 SOL on ≥20 distinct mints. A probe mechanism
-buys 0.01 SOL of a liquid curve and sells as soon as it lands — but only when the fill /
-distinct-coin pace lags its target, so the main strategy never fee-bleeds to chase the bar
-when it is already on pace.
+buys 0.01 SOL of a liquid, non-bundle curve and sells as soon as it lands — but only when
+the distinct-coin count lags its prorated pace target (25 coins over the window), so the
+main strategy never fee-bleeds to chase the bar when it is already on pace. Fills have no
+minimum in this competition, so the probe paces on coins, not fills.
 
 ## Fees, sizing, determinism
 
 A round trip costs ~2.5% in curve fees plus ~210k lamports of tx fees per order, so tiny
-trades are fee-suicide: entries are sized 0.05–0.5 SOL and only the pace probe ever trades
-at the 0.01 SOL minimum. The bot is fully deterministic — insertion-ordered Maps only,
+trades are fee-suicide: entries are a flat 0.05 SOL (the harness cap of 1% of real reserve
+allows up to 0.3–1.2 SOL on these big curves, but bigger size only scales the same edge)
+and only the pace probe ever trades at the 0.01 SOL minimum. The bot is fully deterministic — insertion-ordered Maps only,
 no clock, no environment, no `Math.random`; any randomness would be seeded only from
 `state.hello.seed`. It is executed twice by the grader and the two action logs must match
 byte-for-byte.
