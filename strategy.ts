@@ -53,8 +53,12 @@ export interface Params {
   addStepBps: number;
   /** Slots to wait between buys on the same coin. */
   addDelay: number;
-  /** Total paper exposure cap across all positions (lamports). */
-  maxExposureLamports: number;
+  /** Re-entry: a coin that was exited may be bought again once the cooldown has passed
+   *  and it still passes the filters, up to maxEntries times in total. The per-point edge
+   *  lives on already-big coins, so one shot per coin wastes it; the cooldown keeps the
+   *  bot from re-buying a coin the moment it dumps. */
+  reentryCooldown: number;
+  maxEntries: number;
   /** Slippage allowed on buys (bps). */
   buySlippageBps: number;
   /** Breakeven partial harvest: sell this share once up this far (bps). */
@@ -127,6 +131,8 @@ export const DEFAULT_PARAMS: Params = {
   addStepBps: 300,
   addDelay: 4,
   maxExposureLamports: 6_000_000_000,
+  reentryCooldown: 300,
+  maxEntries: 3,
   buySlippageBps: 500,
   tp1Bps: 1000,
   tp1PartBps: 5000,
@@ -180,6 +186,10 @@ interface CoinTape {
   ticks: TapeTick[];
   buysSent: number;
   spentSent: bigint;
+  /** Completed entries on this coin (for the re-entry cap). */
+  entries: number;
+  /** Do not re-enter before this slot (cooldown after an exit). */
+  coolUntil: number;
   lastBuyVq: bigint;
   lastBuyVt: bigint;
   lastBuySlot: number;
@@ -286,6 +296,8 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
           ticks: [],
           buysSent: 0,
           spentSent: 0n,
+          entries: 0,
+          coolUntil: 0,
           lastBuyVq: 0n,
           lastBuyVt: 1n,
           lastBuySlot: 0,
@@ -432,8 +444,6 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
           if (pos !== undefined && !selling.has(f.mint) && orders.length < cap) {
             orders.push({ side: 'sell', mint: f.mint, token_amount: pos.token_amount, max_slippage_bps: 10_000 });
             selling.add(f.mint);
-            const t = tapes.get(f.mint);
-            if (t !== undefined) t.done = true;
           }
         }
         // A probe buy that was rejected or failed never fills, so it must not jam the
@@ -480,7 +490,6 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
               selling.add(mint);
               h.tookTp1 = true;
               h.best = 0n;
-              if (t !== undefined) t.done = true;
               continue;
             }
           }
@@ -514,7 +523,15 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
         if (!exit) continue;
         orders.push({ side: 'sell', mint, token_amount: pos.token_amount, max_slippage_bps: 10_000 });
         selling.add(mint);
-        if (t !== undefined) t.done = true;
+        if (t !== undefined) {
+          // Exit counts as a completed entry; the coin may be bought again after the
+          // cooldown, unless it hit the entry cap or the creator dumped (done for good).
+          t.entries += 1;
+          t.coolUntil = state.slot + P.reentryCooldown;
+          t.spentSent = 0n;
+          t.buysSent = 0;
+          if (t.entries >= P.maxEntries || t.devSold) t.done = true;
+        }
       }
 
       // ---- entries and adds ----------------------------------------------------
@@ -526,7 +543,10 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
         if (orders.length >= cap) break;
         if (t.done || t.complete) continue;
         const age = state.slot - t.createSlot;
-        const isAdd = t.buysSent > 0;
+        // An add only pyramids a position actually held now; a re-entry after an exit
+        // comes back through the entry branch below.
+        const isAdd = t.buysSent > 0 && state.positions.has(t.mint);
+        if (state.slot < t.coolUntil) continue;
         if (!isAdd && age > P.maxAge) {
           t.done = true;
           continue;
