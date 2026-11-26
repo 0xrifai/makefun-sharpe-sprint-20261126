@@ -91,8 +91,13 @@ export interface Params {
   govRedTpBps: number;
   govRedSlBps: number;
   govRedTrailBps: number;
-  /** Guardrail pacing: fills due over this many block-time seconds; probe buy size. */
-  fillTarget: number;
+  /** Guardrail pacing: the run needs round trips on at least 20 distinct mints. Pace on
+   *  COINS, not fills (fills have no minimum): when the distinct-mint count lags the
+   *  prorated coinTarget over windowSeconds, a 0.01 SOL probe buys a liquid curve and
+   *  sells as soon as it lands. Probes are a top-up only — the main engine should supply
+   *  most coins — so each one costs ~4.6% of 0.01 SOL and there are at most coinTarget
+   *  of them in the worst case. */
+  coinTarget: number;
   windowSeconds: number;
   probeLamports: number;
   /** Minimum real SOL a probe target must hold. */
@@ -143,7 +148,7 @@ export const DEFAULT_PARAMS: Params = {
   govRedTpBps: 500,
   govRedSlBps: 800,
   govRedTrailBps: 1200,
-  fillTarget: 200,
+  coinTarget: 25,
   windowSeconds: 21_600,
   probeLamports: 10_000_000,
   probeMinRealSol: 20_000_000_000,
@@ -209,7 +214,8 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
   const probed = new Set<Pubkey>();
   /** Mints with a probe buy in flight; sold as soon as the buy fill lands. */
   const probePending = new Set<Pubkey>();
-  let filled = 0;
+  /** Distinct mints with a filled buy (main or probe): the guardrail pace metric. */
+  const coinsBought = new Set<Pubkey>();
   let firstTime: number | null = null;
   let nowTime = 0;
 
@@ -414,7 +420,7 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
           probePending.delete(f.mint);
           continue;
         }
-        if (f.status === 'filled') filled += 1;
+        if (f.status === 'filled' && f.side === 'buy') coinsBought.add(f.mint);
         const h = book.get(f.mint);
         if (f.status !== 'rejected' && h !== undefined) h.txPaid += BigInt(f.tx_fee_lamports);
         if (f.side === 'buy' && f.status === 'filled' && h === undefined) {
@@ -601,15 +607,21 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
       }
 
       // ---- guardrail probe -----------------------------------------------------
-      // Only when the fill pace lags: buy 0.01 SOL of a liquid curve, sell on the fill.
+      // Only when the distinct-coin pace lags: buy 0.01 SOL of a liquid, non-bundle
+      // curve, sell on the fill. Never probe a bundle launch or a creator-sold coin.
       if (firstTime !== null && orders.length < cap) {
         const elapsed = Math.max(0, Math.min(P.windowSeconds, nowTime - firstTime));
-        const due = (P.fillTarget * elapsed) / P.windowSeconds;
-        if (filled < due && probePending.size === 0) {
+        const due = (P.coinTarget * elapsed) / P.windowSeconds;
+        const haveMints = new Set<Pubkey>(coinsBought);
+        for (const mint of state.positions.keys()) haveMints.add(mint);
+        for (const p of state.pending.values()) if (p.order.side === 'buy') haveMints.add(p.order.mint);
+        if (haveMints.size < due && probePending.size === 0) {
           let bestMint: Pubkey | null = null;
           let bestRq = 0n;
           for (const t of tapes.values()) {
             if (t.done || t.complete || probed.has(t.mint)) continue;
+            if (t.devSold) continue;
+            if (t.earlyBuyers.size > P.maxEarlyBuyers || t.earlyTrades > P.maxEarlyTrades) continue;
             if (state.positions.has(t.mint) || hasPending(state, t.mint, 'buy')) continue;
             if (state.slot - t.lastTradeSlot > 30) continue;
             const curve = state.curves.get(t.mint);
