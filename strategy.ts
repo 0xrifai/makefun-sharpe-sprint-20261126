@@ -465,7 +465,7 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
       let free = state.freeCashLamports() - tx * BigInt(orders.length);
       let open = state.committedPositionCount();
       let exposure = 0n;
-      for (const pos of state.positions) exposure += pos.cost_lamports;
+      for (const [, pos] of state.positions) exposure += pos.cost_lamports;
       for (const t of tapes.values()) {
         if (orders.length >= cap) break;
         if (t.done || t.complete) continue;
