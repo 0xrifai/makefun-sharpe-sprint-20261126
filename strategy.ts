@@ -37,6 +37,8 @@ export interface Params {
   firstBuyLamports: number;
   addLamports: number;
   maxStakeLamports: number;
+  /** Smallest single buy worth paying the tx fee for (lamports). */
+  minBuyLamports: number;
   /** Max adds after the first buy; an add needs price this far above the last buy (bps). */
   maxAdds: number;
   addStepBps: number;
@@ -67,8 +69,12 @@ export interface Params {
   exitFlowLamports: number;
   /** Exit at once when a single sell exceeds this share of real SOL (bps). */
   bigSellExitBps: number;
-  /** Hourly-Sharpe governor: rolling window of hourly returns, vol cap, red-state exit scalers. */
+  /** Hourly-Sharpe governor: rolling window of hourly returns, vol cap, red-state exit scalers.
+   *  Red only on a *convincing* downtrend: rolling mean negative AND rolling Sharpe below
+   *  -govSharpeThreshold, or rolling hourly volatility above govVolBps. A flat book (mean 0,
+   *  vol 0) reads as a large positive Sharpe and stays green. */
   govHours: number;
+  govSharpeThreshold: number;
   govVolBps: number;
   govRedTpBps: number;
   govRedSlBps: number;
@@ -86,9 +92,9 @@ export const DEFAULT_PARAMS: Params = {
   minAge: 15,
   maxAge: 900,
   minRealSol: 2_000_000_000,
-  maxRealSol: 60_000_000_000,
-  minWindowTrades: 8,
-  minWindowBuyers: 5,
+  maxRealSol: 200_000_000_000,
+  minWindowTrades: 4,
+  minWindowBuyers: 3,
   maxTopBuyerBps: 4000,
   minRunupBps: 500,
   maxRunupBps: 5000,
@@ -97,6 +103,7 @@ export const DEFAULT_PARAMS: Params = {
   firstBuyLamports: 50_000_000,
   addLamports: 100_000_000,
   maxStakeLamports: 350_000_000,
+  minBuyLamports: 20_000_000,
   maxAdds: 3,
   addStepBps: 300,
   addDelay: 4,
@@ -115,8 +122,9 @@ export const DEFAULT_PARAMS: Params = {
   exitWindow: 60,
   exitFlowLamports: 20_000_000,
   bigSellExitBps: 2000,
-  govHours: 6,
-  govVolBps: 500,
+  govHours: 3,
+  govSharpeThreshold: 0.5,
+  govVolBps: 800,
   govRedTpBps: 500,
   govRedSlBps: 800,
   govRedTrailBps: 1200,
@@ -231,7 +239,7 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
     variance /= n;
     const vol = Math.sqrt(variance);
     const sharpe = vol > 0 ? mean / vol : mean >= 0 ? 10 : -10;
-    const red = mean < 0 || vol * 10_000 > P.govVolBps;
+    const red = (mean < 0 && sharpe < -P.govSharpeThreshold) || vol * 10_000 > P.govVolBps;
     return { red, n, sharpe, vol };
   }
 
@@ -284,7 +292,9 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
 
   /** Tape stats over the last `window` slots: net flow, first/second-half buys, buyers, top share, high.
    *  Ticks are only ever dropped older than the longest window (entryWindow), so a short-window
-   *  call never corrupts a later long-window read of the same tape. */
+   *  call never corrupts a later long-window read of the same tape. firstPrice is the price of
+   *  the earliest tick inside the window: the run-up is measured over the window itself, not
+   *  from the create price (a coin that pumped long ago and now consolidates is not a breakout). */
   function windowStats(t: CoinTape, slot: number, window: number): {
     net: bigint;
     accelerating: boolean;
@@ -292,6 +302,7 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
     topShareBps: bigint;
     trades: number;
     high: number;
+    firstPrice: number;
     buyVol: bigint;
   } {
     const keepFrom = slot - P.entryWindow;
@@ -305,10 +316,14 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
     let secondHalfBuy = 0n;
     let buyVol = 0n;
     let high = 0;
+    let firstPrice = 0;
+    let trades = 0;
     const perBuyer = new Map<Pubkey, bigint>();
     const buyers = new Set<Pubkey>();
     for (const tick of t.ticks) {
       if (tick.slot <= from) continue;
+      trades += 1;
+      if (firstPrice === 0) firstPrice = tick.price;
       if (tick.price > high) high = tick.price;
       if (tick.isBuy) {
         net += tick.sol;
@@ -331,8 +346,9 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
       accelerating: secondHalfBuy > firstHalfBuy,
       buyers: buyers.size,
       topShareBps,
-      trades: t.ticks.length,
+      trades,
       high,
+      firstPrice,
       buyVol,
     };
   }
@@ -387,6 +403,12 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
             const t = tapes.get(f.mint);
             if (t !== undefined) t.done = true;
           }
+        }
+        // A probe buy that was rejected or failed never fills, so it must not jam the
+        // probe gate: free the slot and let the mint be probed again later.
+        if (f.side === 'buy' && f.status !== 'filled' && probePending.has(f.mint)) {
+          probePending.delete(f.mint);
+          probed.delete(f.mint);
         }
       }
       for (const mint of [...selling]) if (!hasPending(state, mint, 'sell')) selling.delete(mint);
@@ -497,11 +519,11 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
           if (vq * t.lastBuyVt * BPS < t.lastBuyVq * vt * BigInt(10_000 + P.addStepBps)) continue;
           if (stats.net <= 0n) continue;
           const room = BigInt(P.maxStakeLamports) - t.spentSent;
-          if (room < BigInt(P.firstBuyLamports)) continue;
+          if (room < BigInt(P.minBuyLamports)) continue;
           const maxBuy = state.maxBuyLamports(t.mint);
           const want = BigInt(P.addLamports) < room ? BigInt(P.addLamports) : room;
           const amount = want < maxBuy ? want : maxBuy;
-          if (amount < BigInt(P.firstBuyLamports) || free < amount + tx * 2n) continue;
+          if (amount < BigInt(P.minBuyLamports) || free < amount + tx * 2n) continue;
           if (exposure + amount > BigInt(P.maxExposureLamports)) continue;
           orders.push({ side: 'buy', mint: t.mint, quote_lamports: amount, max_slippage_bps: P.buySlippageBps });
           free -= amount + tx;
@@ -522,16 +544,16 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
         if (stats.buyers < P.minWindowBuyers) continue;
         if (stats.topShareBps > BigInt(P.maxTopBuyerBps)) continue;
         if (stats.net <= 0n || !stats.accelerating) continue;
-        const runup = (vq * t.vt0 * BPS) / (vt * t.vq0);
-        if (runup < BigInt(P.minRunupBps) || runup > BigInt(P.maxRunupBps)) continue;
         const priceNow = vt > 0n ? Number(vq) / Number(vt) : 0;
+        const runup = stats.firstPrice > 0 && priceNow > 0 ? (priceNow - stats.firstPrice) / stats.firstPrice : 0;
+        if (runup * 10_000 < P.minRunupBps || runup * 10_000 > P.maxRunupBps) continue;
         if (stats.high <= 0 || priceNow * (10_000 + P.withinHighBps) < stats.high * 10_000) continue;
         const room = BigInt(P.maxStakeLamports) - t.spentSent;
-        if (room < BigInt(P.firstBuyLamports)) continue;
+        if (room < BigInt(P.minBuyLamports)) continue;
         const maxBuy = state.maxBuyLamports(t.mint);
         const want = BigInt(P.firstBuyLamports) < room ? BigInt(P.firstBuyLamports) : room;
         const amount = want < maxBuy ? want : maxBuy;
-        if (amount < BigInt(P.firstBuyLamports) || free < amount + tx * 2n) continue;
+        if (amount < BigInt(P.minBuyLamports) || free < amount + tx * 2n) continue;
         if (exposure + amount > BigInt(P.maxExposureLamports)) continue;
         orders.push({ side: 'buy', mint: t.mint, quote_lamports: amount, max_slippage_bps: P.buySlippageBps });
         free -= amount + tx;
