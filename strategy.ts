@@ -37,6 +37,11 @@ export interface Params {
   withinHighBps: number;
   /** Skip the coin when the creator sold before entry. */
   skipDevSold: boolean;
+  /** Bundle filter: a launch whose first 3 slots already had this many distinct buyers
+   *  or trades is a coordinated bundle (many wallets in, all out together one slot later)
+   *  and is skipped for good, however big it grows. */
+  maxEarlyBuyers: number;
+  maxEarlyTrades: number;
   /** First buy size, per-add size, and total stake cap per coin (lamports). */
   firstBuyLamports: number;
   addLamports: number;
@@ -107,11 +112,13 @@ export const DEFAULT_PARAMS: Params = {
   maxRunupBps: 10000,
   withinHighBps: 500,
   skipDevSold: true,
+  maxEarlyBuyers: 10,
+  maxEarlyTrades: 9,
   firstBuyLamports: 50_000_000,
   addLamports: 100_000_000,
   maxStakeLamports: 350_000_000,
   minBuyLamports: 20_000_000,
-  maxAdds: 3,
+  maxAdds: 0,
   addStepBps: 300,
   addDelay: 4,
   maxExposureLamports: 6_000_000_000,
@@ -160,6 +167,9 @@ interface CoinTape {
   vq0: bigint;
   vt0: bigint;
   devSold: boolean;
+  /** Launch shape: distinct buyers and trade count in the first 3 slots (bundle filter). */
+  earlyBuyers: Set<Pubkey>;
+  earlyTrades: number;
   trades: number;
   lastTradeSlot: number;
   ticks: TapeTick[];
@@ -263,6 +273,8 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
           vq0: BigInt(e.virtual_quote_reserves),
           vt0: BigInt(e.virtual_token_reserves),
           devSold: false,
+          earlyBuyers: new Set(),
+          earlyTrades: 0,
           trades: 0,
           lastTradeSlot: e.slot,
           ticks: [],
@@ -280,6 +292,10 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
         const sol = BigInt(e.sol_amount);
         t.trades += 1;
         t.lastTradeSlot = e.slot;
+        if (e.slot <= t.createSlot + 2) {
+          t.earlyTrades += 1;
+          if (e.is_buy && e.user !== t.creator) t.earlyBuyers.add(e.user);
+        }
         const vq = BigInt(e.virtual_quote_reserves);
         const vt = BigInt(e.virtual_token_reserves);
         t.ticks.push({
@@ -470,6 +486,8 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
         const heldLong = state.slot - h.openedSlot >= P.maxHold;
         if (heldLong && !(basis > 0n && value * BPS >= basis * (BPS + BigInt(P.holdFreeBps)))) exit = true;
         if (t !== undefined) {
+          // The creator selling while held is the dump signal: leave at once.
+          if (t.devSold) exit = true;
           if (state.slot - t.lastTradeSlot >= P.staleSlots) exit = true;
           const flow = windowStats(t, state.slot, P.exitWindow);
           if (flow.net < -BigInt(P.exitFlowLamports)) exit = true;
@@ -519,6 +537,12 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
         if (curve === undefined || curve.complete) continue;
         if (t.devSold && P.skipDevSold) {
           if (!isAdd) t.done = true;
+          continue;
+        }
+        // Bundle filter: the launch tape is final by now (entry is at age >= minAge),
+        // so a coordinated launch is recognizable and skipped for good.
+        if (!isAdd && (t.earlyBuyers.size > P.maxEarlyBuyers || t.earlyTrades > P.maxEarlyTrades)) {
+          t.done = true;
           continue;
         }
         const vq = curve.virtual_quote_reserves;
