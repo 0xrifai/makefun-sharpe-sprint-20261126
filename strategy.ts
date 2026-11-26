@@ -110,7 +110,7 @@ export interface Params {
 
 export const DEFAULT_PARAMS: Params = {
   entryWindow: 120,
-  minAge: 120,
+  minAge: 300,
   maxAge: 3000,
   minRealSol: 30_000_000_000,
   maxRealSol: 120_000_000_000,
@@ -131,7 +131,7 @@ export const DEFAULT_PARAMS: Params = {
   addStepBps: 300,
   addDelay: 4,
   maxExposureLamports: 6_000_000_000,
-  reentryCooldown: 300,
+  reentryCooldown: 600,
   maxEntries: 3,
   buySlippageBps: 500,
   tp1Bps: 1000,
