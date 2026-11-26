@@ -74,11 +74,14 @@ export interface Params {
   /** Exit at once when a single sell exceeds this share of real SOL (bps). */
   bigSellExitBps: number;
   /** Hourly-Sharpe governor: rolling window of hourly returns, vol cap, red-state exit scalers.
-   *  Red only on a *convincing* downtrend: rolling mean negative AND rolling Sharpe below
-   *  -govSharpeThreshold, or rolling hourly volatility above govVolBps. A flat book (mean 0,
-   *  vol 0) reads as a large positive Sharpe and stays green. */
+   *  Red only on a *material* deterioration — the last hour lost more than govLastLossBps,
+   *  the rolling mean lost more than govMeanLossBps, or rolling hourly volatility tops
+   *  govVolBps. Small consistent losses must NOT latch it red: a flat book (mean 0, vol 0)
+   *  stays green, and a red state clears as soon as the window slides past the bad hour, so
+   *  the governor throttles risk instead of shutting the bot down for the whole run. */
   govHours: number;
-  govSharpeThreshold: number;
+  govLastLossBps: number;
+  govMeanLossBps: number;
   govVolBps: number;
   govRedTpBps: number;
   govRedSlBps: number;
@@ -127,7 +130,8 @@ export const DEFAULT_PARAMS: Params = {
   exitFlowLamports: 20_000_000,
   bigSellExitBps: 2000,
   govHours: 3,
-  govSharpeThreshold: 0.5,
+  govLastLossBps: 200,
+  govMeanLossBps: 100,
   govVolBps: 800,
   govRedTpBps: 500,
   govRedSlBps: 800,
@@ -234,7 +238,9 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
       }
     }
     const n = hourlyReturns.length;
-    if (n < 2) return { red: false, n, sharpe: 0, vol: 0 };
+    if (n < 1) return { red: false, n, sharpe: 0, vol: 0 };
+    const last = hourlyReturns[n - 1]!;
+    if (n < 2) return { red: last * 10_000 < -P.govLastLossBps, n, sharpe: 0, vol: 0 };
     let mean = 0;
     for (const r of hourlyReturns) mean += r;
     mean /= n;
@@ -243,7 +249,7 @@ export function createStrategy(params: Params = DEFAULT_PARAMS): Strategy {
     variance /= n;
     const vol = Math.sqrt(variance);
     const sharpe = vol > 0 ? mean / vol : mean >= 0 ? 10 : -10;
-    const red = (mean < 0 && sharpe < -P.govSharpeThreshold) || vol * 10_000 > P.govVolBps;
+    const red = last * 10_000 < -P.govLastLossBps || mean * 10_000 < -P.govMeanLossBps || vol * 10_000 > P.govVolBps;
     return { red, n, sharpe, vol };
   }
 
